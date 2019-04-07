@@ -1,0 +1,774 @@
+---
+title: "1st Assignment"
+author: "Andrew Rizk"
+date: "17/02/2019"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+---
+
+#### Introduction
+In this following practice, we will attempt to predict house prices in Iowa based on the House Prices Dataset on Kaggle: <https://www.kaggle.com/c/house-prices-advanced-regression-techniques>.
+
+The dataset presents different features of the houses that  variably change the predictions. The data will require some work for cleaning and preprocessing to be ready for modeling.
+First, we will need to load the packages required for preprocessing and modeling phases.
+
+The steps of this practice will involve:
+1 - Cleaning the data from null values using domain knowledge or practical judgements.
+2 - Removing outliers from train data so they don't affect our predictions.
+3 - Feature Engineering: this will involve transforming variables, creating new variables, and eliminating variables in favor of our predictions.
+4 - Adjusting skewness for our numeric variables
+5 - Using our transformed data with different practices and apply different evaluation models to predict the final price of each home
+
+```{r Setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(plyr)
+library(tidyr)
+library(dplyr)     # To compute the `union` of the levels.
+library(png)       # To include images in this document.
+library(knitr)     # To include images inline in this doc.
+library(moments)   # Skewness
+library(e1071)     # Alternative for Skewness
+library(glmnet)    # Lasso
+library(caret)     # To enable Lasso training with CV.
+library(corrplot)
+```
+
+#### Data Loading
+We will load the data and combine train and test data to get an idea of the data structure before any further preprocessing. This is to avoid doing preprocessing twice and to have consistent changes in both datasets. We will only separate the two datasets in the outliers section so that we don't affect our test data.
+
+We will create a SalePrice column for the test data before binding the two datasets.
+
+```{r Load Data}
+original_training_data = read.csv(file = file.path("train.csv"))
+original_test_data = read.csv(file = file.path("test.csv"))
+
+# Create Sale Price column in original_test_data.
+original_test_data$SalePrice <- 0
+# Join both datasets in order to make it easier to work with.
+dataset <- rbind(original_training_data, original_test_data)
+cat("The combined dataset has ", dim(dataset)[1], "rows and ", dim(dataset)[2], "columns")
+
+```
+
+#### Data Structure
+Now we will check the structure of the dataset.
+
+```{r Dataset Visualization}
+# visualizing the dataset to know the structure and components of each variable
+str(dataset)
+summary(dataset)
+```
+
+#### Feature Removal
+We can identify some features that don't add any value to the dataset due to their nature.
+The variable 'Utilities' has almost a unique value so it is not going to offer any advantage for prediction.
+The variable 'Id' is a key and will not have any impact in the final predicion.
+The variable 'Street' also seems to have a unique value so it will be eliminated
+
+```{r Feature removal}
+dataset <- dataset[,-which(names(dataset) == "Utilities")]
+dataset <- dataset[,-which(names(dataset) == "Id")]
+dataset <- dataset[,-which(names(dataset) == "Street")]
+```
+
+
+#### NAs Discovery and Imputing
+
+We need to clean NA values in all the columns and fill the empty cells with proper judgements based on each variable's condition.
+First, we explore which columns have missing values.
+
+```{r NAs discovery}
+na.cols <- which(colSums(is.na(dataset)) > 0)
+paste('There are', length(na.cols), 'columns with missing values')
+sort(colSums(sapply(dataset[na.cols], is.na)), decreasing = TRUE)
+```
+
+Now we start looking at each variable separately and impute the missing values using a logical argument or with domain knowledge. This process will be done manually to allow for better control of each variable.
+
+As a general rule, categorical/factor features were imputed with "None" and numeric variables were treated with 0s. However, as previously mentioned, some variables were treated differently by either using the mode/median or using further analysis.
+
+```{r Data Cleaning}
+# Creating a function Modes that calculates the mode for categorical variables
+Modes <- function(x) {
+  ux <- unique(x)
+  tab <- tabulate(match(x, ux))
+  ux[tab == max(tab)]
+}
+
+# Alley : NA means "no alley access
+dataset$Alley <- factor(dataset$Alley, 
+                        levels=c(levels(dataset$Alley), "None"))
+dataset$Alley[which(is.na(dataset$Alley))] <- "None"
+
+# MiscFeature : NA means "no Miscellaneous features that are covered in other categories"
+dataset$MiscFeature <- factor(dataset$MiscFeature, 
+                              levels=c(levels(dataset$MiscFeature), "None"))
+dataset$MiscFeature[which(is.na(dataset$MiscFeature))] <- "None"
+
+# PoolQC : NA means there's no pool quality value since the house has no pool
+dataset$PoolQC <- factor(dataset$PoolQC, 
+                         levels=c(levels(dataset$PoolQC), "None"))
+dataset$PoolQC[which(is.na(dataset$PoolQC))] <- "None"
+
+# Fence : NA means that the house has no fence
+dataset$Fence <- factor(dataset$Fence, 
+                        levels=c(levels(dataset$Fence), "None"))
+dataset$Fence[which(is.na(dataset$Fence))] <- "None"
+
+# FireplaceQu : NA means that the place has no fire place so we will use None for imputing
+dataset$FireplaceQu <- factor(dataset$FireplaceQu, 
+                              levels=c(levels(dataset$FireplaceQu), "None"))
+dataset$FireplaceQu[which(is.na(dataset$FireplaceQu))] <- "None"
+
+# LotFrontage : we substitute the NAs by the 0
+dataset$LotFrontage[which(is.na(dataset$LotFrontage))] <- 0
+
+#For GARAGE
+
+# GarageYrBlt : NA most likely means no garage is present so we substitute the NA by 0
+dataset$GarageYrBlt[which(is.na(dataset$GarageYrBlt))] <- 0
+
+# GarageCars and GarageArea (NUMERICAL): with 0 which means we assume no garage is present
+dataset$GarageCars[which(is.na(dataset$GarageCars))] <- 0
+dataset$GarageArea[which(is.na(dataset$GarageArea))] <- 0
+
+# GarageFinish : NA means that the place has no garage
+dataset$GarageFinish <- factor(dataset$GarageFinish, 
+                               levels=c(levels(dataset$GarageFinish), "None"))
+dataset$GarageFinish[which(is.na(dataset$GarageFinish))] <- "None"
+
+# GarageQual : NA means that the place has no garage
+dataset$GarageQual <- factor(dataset$GarageQual, 
+                             levels=c(levels(dataset$GarageQual), "None"))
+dataset$GarageQual[which(is.na(dataset$GarageQual))] <- "None"
+
+
+# GarageCond : NA means that the place has no garage
+dataset$GarageCond <- factor(dataset$GarageCond, 
+                             levels=c(levels(dataset$GarageCond), "None"))
+dataset$GarageCond[which(is.na(dataset$GarageCond))] <- "None"
+
+
+# GarageType : NA means that the place has no garage
+dataset$GarageType <- factor(dataset$GarageType, 
+                             levels=c(levels(dataset$GarageType), "None"))
+dataset$GarageType[which(is.na(dataset$GarageType))] <- "None"
+
+
+# Now for detached garages where area and number of cars more than zero, we will fill the values with the mode
+dataset[dataset$GarageYrBlt %in% '0' & 
+          dataset$GarageType %in% 'Detchd' & 
+          dataset$GarageCars > 0 & 
+          dataset$GarageArea > 0,]$GarageCond <- Modes(dataset$GarageCond)
+
+dataset[dataset$GarageYrBlt %in% '0' & 
+          dataset$GarageType %in% 'Detchd' & 
+          dataset$GarageCars > 0 & 
+          dataset$GarageArea > 0,]$GarageQual <- Modes(dataset$GarageQual)
+
+dataset[dataset$GarageYrBlt %in% '0' & 
+          dataset$GarageType %in% 'Detchd' & 
+          dataset$GarageCars > 0 & 
+          dataset$GarageArea > 0,]$GarageFinish <- Modes(dataset$GarageFinish)
+
+
+#For BASEMENT
+
+# BsmtCond: NAs assume that there is no basement
+dataset$BsmtCond <- factor(dataset$BsmtCond, 
+                           levels=c(levels(dataset$BsmtCond), "None"))
+dataset$BsmtCond[which(is.na(dataset$BsmtCond))] <- "None"
+# BsmtExposure: NAs either mean that we have no exposure or no basement
+dataset$BsmtExposure <- factor(dataset$BsmtExposure, 
+                               levels=c(levels(dataset$BsmtExposure), "None"))
+dataset$BsmtExposure[which(is.na(dataset$BsmtExposure))] <- "None"
+# BsmtQual: NAs assume that there is no basement
+dataset$BsmtQual <- factor(dataset$BsmtQual, 
+                           levels=c(levels(dataset$BsmtQual), "None"))
+dataset$BsmtQual[which(is.na(dataset$BsmtQual))] <- "None"
+# BsmtFinType1: NAs assume that there is no basement
+dataset$BsmtFinType1 <- factor(dataset$BsmtFinType1, 
+                               levels=c(levels(dataset$BsmtFinType1), "None"))
+dataset$BsmtFinType1[which(is.na(dataset$BsmtFinType1))] <- "None"
+# BsmtFinType2: NAs assume that there is no basement
+dataset$BsmtFinType2 <- factor(dataset$BsmtFinType2, 
+                               levels=c(levels(dataset$BsmtFinType2), "None"))
+dataset$BsmtFinType2[which(is.na(dataset$BsmtFinType2))] <- "None"
+
+# BsmtFinSF1 (NUMERICAL): NAs assume that there is no basement
+dataset$BsmtFinSF1[which(is.na(dataset$BsmtFinSF1))] <- 0
+# BsmtFinSF2 (NUMERICAL): NAs assume that there is no basement
+dataset$BsmtFinSF2[is.na(dataset$BsmtFinSF2)] <- 0
+# BsmtUnfSF (NUMERICAL): NAs assume that there is no basement 
+dataset$BsmtUnfSF[is.na(dataset$BsmtUnfSF)] <- 0
+# TotalBsmtSF (NUMERICAL): NAs assume that there is no basement
+dataset$TotalBsmtSF[is.na(dataset$TotalBsmtSF)] <- 0
+# BsmtFullBath & BsmtHalfBath (NUMERICAL): NAs assume that there is no basement bathrooms
+dataset$BsmtFullBath[is.na(dataset$BsmtFullBath)] <- 0
+dataset$BsmtHalfBath[is.na(dataset$BsmtHalfBath)] <- 0
+
+
+#MasVnrArea & MasVnrType: NAs assume that we have no masonry veneer area
+dataset[is.na(dataset$MasVnrType) & is.na(dataset$MasVnrArea),]$MasVnrArea <- 0
+dataset[is.na(dataset$MasVnrType) & dataset$MasVnrArea >= 0,]$MasVnrType <- "None"
+dataset[dataset$MasVnrType %in% "None" & dataset$MasVnrArea >= 0,]$MasVnrArea <- 0
+dataset[!dataset$MasVnrType %in% "None" & dataset$MasVnrArea == 0,]$MasVnrType <- "None"
+
+# MSZoning: NAs assume that that the general zoning classificaion is unknown 
+dataset$MSZoning <- factor(dataset$MSZoning, 
+                           levels=c(levels(dataset$MSZoning), "None"))
+dataset$MSZoning[which(is.na(dataset$MSZoning))] <- "None"
+
+# Exterior1st & Exterior2nd: we will use the modes of exteriors covering for imputing
+dataset$Exterior1st[which(is.na(dataset$Exterior1st))] <- Modes(dataset$Exterior1st)
+dataset$Exterior2nd[which(is.na(dataset$Exterior2nd))] <- Modes(dataset$Exterior2nd)
+
+
+# SaleType (Categorical): We will use other for filling NAs
+dataset$SaleType <- factor(dataset$SaleType, 
+                           levels=c(levels(dataset$SaleType), "Other"))
+dataset$SaleType[which(is.na(dataset$SaleType))] <- "Other"
+
+# Electrical (Categorical): Electrical system modes will be using for imputing
+#Using the Modes function to get the mode of Electrical variable
+dataset$Electrical[which(is.na(dataset$Electrical))] <- Modes(dataset$Electrical)
+
+# KitchenQual (Categorical): Kitchen quality modes will be using for imputing
+#Using the Modes function to get the mode of Kitchen Quality variable
+dataset$KitchenQual[which(is.na(dataset$KitchenQual))] <- Modes(dataset$KitchenQual)
+
+# Functional (Categorical): Home functionality modes will be used for imputing
+#Using the Modes function to get the mode of Functional variable
+dataset$Functional[which(is.na(dataset$Functional))] <- Modes(dataset$Functional)
+```
+
+
+#### Factorize numerical to categories
+
+There are some numerical features that should be perseved as categorical ones, in order to gasp correctly the information inside those columns.
+If we analyze some features we will see that we have categorical values encoded as numeric. We will transform some of those into factors since they wont be used in any calculation.
+
+```{r Factorize}
+# Some features are mis-classified as integer so we will factorize them to make them categorical
+
+dataset$MSSubClass <- as.factor(dataset$MSSubClass)
+dataset$MoSold <- as.factor(dataset$MoSold)
+
+# The variable YrSold will be used later in feature engineering and will factorized 
+
+```
+
+
+#### Outliers
+
+Outliers represent a big problem for numerical variables and can decrease the quality of any model and causes bias in our predeictions. We will look at numerical variables manually using ggplot and remove outliers accordingly.
+
+Train and test data will be splits for outlier removal then we will bind them again for further preprocessing.
+
+It is also important to note than not all columns with numeric values are classified as numeric variables. Some variables represent quality for example.
+
+```{r Outlier Detection and Removal}
+
+
+training_data <- dataset[1:1460,]
+test_data <- dataset[1461:2919,]
+
+# Plot numerical features vs SalePrice to visualize outliers
+
+ggplot(training_data, aes(GrLivArea, SalePrice)) + geom_point()
+ggplot(training_data, aes(LotArea, SalePrice)) + geom_point()
+ggplot(training_data, aes(LotFrontage, SalePrice)) + geom_point()
+ggplot(training_data, aes(GarageArea, SalePrice)) + geom_point()
+ggplot(training_data, aes(PoolArea, SalePrice)) + geom_point()
+ggplot(training_data, aes(ScreenPorch, SalePrice)) + geom_point()
+ggplot(training_data, aes(MiscVal, SalePrice)) + geom_point()
+ggplot(training_data, aes(OpenPorchSF, SalePrice)) + geom_point()
+ggplot(training_data, aes(MasVnrArea, SalePrice)) + geom_point()
+ggplot(training_data, aes(BsmtFinSF1, SalePrice)) + geom_point()
+ggplot(training_data, aes(BsmtFinSF2, SalePrice)) + geom_point()
+ggplot(training_data, aes(BsmtUnfSF, SalePrice)) + geom_point()
+ggplot(training_data, aes(TotalBsmtSF, SalePrice)) + geom_point()
+ggplot(training_data, aes(LowQualFinSF, SalePrice)) + geom_point()
+ggplot(training_data, aes(WoodDeckSF, SalePrice)) + geom_point()
+ggplot(training_data, aes(EnclosedPorch, SalePrice)) + geom_point()
+
+```
+
+```{r}
+
+# Based on the above plots, we will remove the outliers from selected features so they don't affect our predictions
+
+training_data <- subset(training_data, GrLivArea < 4000)
+training_data <- subset(training_data, LotArea < 100000)
+training_data <- subset(training_data, LotFrontage < 300)
+training_data <- subset(training_data, GarageArea < 1500)
+training_data <- subset(training_data, OpenPorchSF < 500)
+training_data <- subset(training_data, MasVnrArea < 1250)
+training_data <- subset(training_data, BsmtFinSF1 < 3000)
+training_data <- subset(training_data, BsmtFinSF2 < 1250)
+training_data <- subset(training_data, BsmtFinSF1 < 3000)
+training_data <- subset(training_data, TotalBsmtSF < 6000)
+training_data <- subset(training_data, WoodDeckSF < 750)
+training_data <- subset(training_data, EnclosedPorch < 400)
+dim(training_data)
+dim(test_data)
+
+# combine dataset again
+dataset <- rbind(training_data, test_data)
+
+# Now after removing outliers, the dimensions of the training set changes from 1460 rows to 1443 rows so for further splitting we will use 1:1443
+```
+
+#### Correlations
+
+Correlations are used to identify which variable has more correlation with our target variable. We will explore correlations using a heat map for a better understanding of the data.
+Again, it is important to note that some categorical features correlations are calculated within the heat map due to their numeric nature. So we will not take them into consideration.
+
+```{r}
+#create a set of numeric variables to see correlations with the sale price
+numeric_var <- names(dataset[1:1460,])[which(sapply(dataset[1:1460,], is.numeric))]
+cat_var <- names(dataset[1:1460,])[which(sapply(dataset[1:1460,], is.factor))]
+
+train_num <- dataset[1:1460,][numeric_var]
+
+num_correlations <- cor(train_num[,-1])
+corrplot(num_correlations, method = "square")
+corrplot(num_correlations, method = "number")
+```
+
+
+#### Feature creation/elimination
+
+In this section we will do some variable transformation and variable creation to improve our final results. Some variables will be created however will be eliminated later by our regression model as we apply penalties using whether Lasso or Regression. 
+
+
+```{r Feature creation}
+ 
+# some categorical features that identify quality can be converted to numeric on a scale from 0-5 (Advanced Factorization)
+# These features are GarageCond, GarageQual, FireplaceQu, KitchenQual, HeatingQC, ExterQual, ExterCond, BsmtQual, BsmtCond, BsmtExposure
+
+# We will build a quality map for these features to be used for conversion
+quality.map <- c('None' = 0, 'Po' = 1, 'Fa' = 2, 'TA' = 3, 'Gd' = 4, 'Ex' = 5)
+
+dataset$GarageCond <- factor(dataset$GarageCond, levels = c("None", "Po", "Fa", "TA", "Gd", "Ex"), labels = quality.map)
+dataset$GarageQual <- factor(dataset$GarageQual, levels = c("None", "Po", "Fa", "TA", "Gd", "Ex"), labels = quality.map)
+dataset$FireplaceQu <- factor(dataset$FireplaceQu, levels = c("None", "Po", "Fa", "TA", "Gd", "Ex"), labels = quality.map)
+dataset$KitchenQual <- factor(dataset$KitchenQual, levels = c("None", "Po", "Fa", "TA", "Gd", "Ex"), labels = quality.map)
+dataset$HeatingQC <- factor(dataset$HeatingQC, levels = c("None", "Po", "Fa", "TA", "Gd", "Ex"), labels = quality.map)
+dataset$ExterQual <- factor(dataset$ExterQual, levels = c("None", "Po", "Fa", "TA", "Gd", "Ex"), labels = quality.map)
+dataset$ExterCond <- factor(dataset$ExterCond, levels = c("None", "Po", "Fa", "TA", "Gd", "Ex"), labels = quality.map)
+dataset$BsmtQual <- factor(dataset$BsmtQual, levels = c("None", "Po", "Fa", "TA", "Gd", "Ex"), labels = quality.map)
+dataset$BsmtCond <- factor(dataset$BsmtCond, levels = c("None", "Po", "Fa", "TA", "Gd", "Ex"), labels = quality.map)
+
+# Now we will perform the same procedure on other categorical/ordinal variables
+dataset$BsmtExposure <- factor(dataset$BsmtExposure, levels = c("None", "No", "Mn", "Av", "Gd"), labels = c(0, 1, 2, 3, 4))
+dataset$BsmtFinType1 <- factor(dataset$BsmtFinType1, levels = c("None", "Unf", "LwQ", "Rec", "BLQ", "ALQ", "GLQ"), labels = c(0, 1, 2, 3, 4, 5, 6))
+dataset$BsmtFinType2 <- factor(dataset$BsmtFinType2, levels = c("None", "Unf", "LwQ", "Rec", "BLQ", "ALQ", "GLQ"), labels = c(0, 1, 2, 3, 4, 5, 6))
+dataset$Functional <- factor(dataset$Functional, levels = c("None", "Sal", "Sev", "Maj2", "Maj1", "Mod", "Min2", "Min1", "Typ"), labels = c(0, 1, 2, 3, 4, 5, 6, 7, 8))
+dataset$GarageFinish <- factor(dataset$GarageFinish, levels = c("None", "Unf", "RFn", "Fin"), labels = c(0, 1, 2, 3))
+dataset$Fence <- factor(dataset$Fence, levels = c("None", "MnWw", "GdWo", "MnPrv", "GdPrv"), labels = c(0, 1, 2, 3, 4))
+dataset$PoolQC <- factor(dataset$PoolQC, levels = c("None", "Fa", "Gd", "Ex"), labels = c(0, 1, 2, 3))
+
+# We will create a dummy variable of 0 and 1 for PavedDrive variable. If the value is Y we will have 1 otherwise we will have 0 
+dataset$PavedDrive <- factor(dataset$PavedDrive, levels = c("N", "P", "Y"), labels = c(0, 0, 1))
+
+#We wll do the same for central air variable.
+dataset$CentralAir <- factor(dataset$CentralAir, levels = c("Y", "N"), labels = c(1, 0))
+
+# We will create a dummy variable NewHouse using the YrSold and YearBuild. If the two values are equal then it's a new house and will be evaluated as 1 otherwise it will be 0
+dataset$NewHouse <- ifelse(dataset$YrSold==dataset$YearBuilt, 1, 0)
+
+# Now we can factorize the YrSold Variable
+dataset$YrSold <- as.factor(dataset$YrSold)
+
+#We will check if the house has been remodeled or not. If the year the house was build is the same as the remodeling year then we will use 0 otherwise we will use 1
+dataset$Remod <- ifelse(dataset$YearBuilt==dataset$YearRemodAdd, 0, 1) 
+
+dataset$Age <- as.numeric(dataset$YrSold)-dataset$YearRemodAdd
+
+
+#Alley: We will creature a dummy variable for alley where 1 represents presence of Alley and 0 represents no presence.
+dataset$Alley <- factor(dataset$Alley, levels = c("None", "Grvl", "Pave"), labels = c(0, 1, 1))
+
+#LandSlope
+dataset$LandSlope <- factor(dataset$LandSlope, levels = c("Gtl", "Mod", "Sev"), labels = c(1, 0, 0))
+
+#MiscFeature
+dataset$MiscFeature <- factor(dataset$MiscFeature, levels = c("None", "Elev", "Gar2", "Othr", "Shed", "TenC"), labels = c(0, 1, 1, 1, 1, 1))
+
+#LotShape
+dataset$LotShape <- factor(dataset$LotShape, levels = c("IR1", "IR2", "IR3", "Reg"), labels = c(0, 0, 0, 1))
+
+#LandContour
+dataset$LandContour <- factor(dataset$LandContour, levels = c("Bnk", "HLS", "Low", "Lvl"), labels = c(0, 0, 0, 1))
+
+#Condition1
+dataset$Condition1 <- factor(dataset$Condition1, levels = c('Artery', 'Feedr', 'Norm', 'RRNn', 'RRAn', 'PosN', 'PosA', 'RRNe', 'RRAe'), labels = c(0, 0, 1, 0, 0, 0, 0, 0, 0))
+
+#Condition2
+dataset$Condition2 <- factor(dataset$Condition2, levels = c('Artery', 'Feedr', 'Norm', 'RRNn', 'RRAn', 'PosN', 'PosA', 'RRNe', 'RRAe'), labels = c(0, 0, 1, 0, 0, 0, 0, 0, 0))
+
+
+# we will combine the four bathroom variables into one
+dataset$Bathrooms <- dataset$FullBath + (dataset$HalfBath*0.5) + dataset$BsmtFullBath + (dataset$BsmtHalfBath*0.5)
+
+
+# Total Area
+#we will create a new variable called total area since total housing area is very important in determining the price of a house
+# Note that after creating t he TotalArea variable we will split the dataset to remove the outliers and bind it back.
+dataset$TotalArea <- dataset$GrLivArea + dataset$TotalBsmtSF
+dim(dataset)
+temp_split1 <- dataset[1:1443,]
+temp_split2 <- dataset[1444:2902,]
+ggplot(temp_split1, aes(TotalArea, SalePrice)) + geom_point()
+temp_split1 <- subset(temp_split1, TotalArea < 6000)
+
+# Combine the dataset again
+dim(temp_split1)
+dataset <- rbind(temp_split1, temp_split2)
+dim(dataset)
+dim(temp_split1)
+
+# It is also important to note that the split will now be 1:1442!
+
+# After a few model iterations, some categorical variables seem to put a lot of weight on the prediction which causes a lot of bias in the results to a big extent so we will exclude those.
+# Exterior1st seem to bias the predictions so it will be eliminated to minimize the error
+dataset <- dataset[,-which(names(dataset) == "Exterior1st")]
+
+```
+
+```{r Neighborhood Binning (Not Used)}
+
+# We can visulize neighborhood prices based on the mean values. 
+#ggplot(dataset[1:1442,], aes(x=reorder(Neighborhood, SalePrice, FUN=mean), y=SalePrice)) +
+        #geom_bar(stat='summary', fun.y = "mean", fill='blue') + labs(x='Neighborhood', y="Mean SalePrice") +
+        #theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        #geom_label(stat = "count", aes(label = ..count.., y = ..count..), size=3)
+# Source: <https://www.kaggle.com/erikbruin/house-prices-lasso-xgboost-and-a-detailed-eda>
+# Using Advanced Factorizing on neighborhoods caused a lot of bias in predictions and increases the error so it will not be used for evaluation. However, the code is provided below
+#dataset$Neighborhood <- factor(dataset$Neighborhood, c('MeadowV','IDOTRR','BrDale', 'BrkSide', 'OldTown','Edwards',
+                                 # 'Sawyer','Blueste','SWISU','NPkVill', 'NAmes', 'Mitchel',
+                                 # 'SawyerW','NWAmes','Gilbert', 'Blmngtn','CollgCr','ClearCr',
+                                 # 'Crawfor','Veenker','Somerst','Timber','NoRidge','StoneBr', 'NridgHt'), 
+                                 # labels = c(0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4))
+```
+
+#### Skewness and Normalizing
+
+Skewness measures the symmetry in variable distribution. A normal distribution has skewness of zero.The way of getting rid of the skewness is to use the `log` (or the `log1p`) of the values of that feature, to flatten it. To facilitate the application of the regression model we are going to also eliminate this skewness. For numeric feature with excessive skewness, perform log transformation. We will atempt to adjust the skewness of our numeric variables to make it symmetrical and skewness threshold of 0.8 is used.
+We will normalize some features due to the high variances between each variable, normalizing will help suppress the scale of variables and force the features to exibit a unified state so that no variables take more weight over others. 
+
+```{r Skewness}
+
+
+df <- rbind(data.frame(version="price",x=original_training_data$SalePrice),
+             data.frame(version="log(price+1)",x=log(original_training_data$SalePrice + 1)))
+
+ggplot(data=df) +
+   facet_wrap(~version,ncol=2,scales="free_x") +
+   geom_histogram(aes(x=x), bins = 50)
+
+
+## Target Variable
+# Clean skewness in the target variable
+dataset$SalePrice <- log1p(dataset$SalePrice)
+
+## Feature Variable
+# Define a threshold to the skewness in features
+skewness_threshold = 0.8
+
+# Retrive the column type of every column
+column_types <- sapply(names(dataset), function(x) {
+    class(dataset[[x]])
+  }
+)
+
+# Select the numeric ones
+coltype_numeric <- names(column_types[column_types != "factor"])
+
+# Skew of each numerical variable
+skew <- sapply(coltype_numeric, function(x) { 
+    e1071::skewness(dataset[[x]], na.rm = T)
+  }
+)
+
+# Transform all variables above a threshold skewness.
+skew <- skew[abs(skew) > skewness_threshold]
+for(x in names(skew)) {
+  dataset[[x]] <- log(dataset[[x]] + 1)
+}
+
+```
+
+#### Data split
+To facilitate the data cleaning and feature engineering we merged train and test datasets. We now split them again to create our final model.
+
+```{r Data split}
+## Train / Test split
+# Now we split the dataset again for model training
+training_data <- dataset[1:1442,]
+test_data <- dataset[1443:2901,]
+```
+
+#### Train / Validation split
+We are going to split the annotated dataset in training and validation for the later evaluation of our regression models
+
+```{r}
+# Function to split a dataset into training and validation.
+splitdf <- function(dataframe, seed=NULL) {
+  if (!is.null(seed)) set.seed(seed)
+ 	index <- 1:nrow(dataframe)
+ 	trainindex <- sample(index, trunc(length(index)/1.5))
+ 	trainset <- dataframe[trainindex, ]
+ 	testset <- dataframe[-trainindex, ]
+ 	list(trainset=trainset,testset=testset)
+}
+
+# Applying the function to the training_data
+splits <- splitdf(training_data, seed=1)
+
+# Splitting the data into train set and validation set
+training <- splits$trainset
+validation <- splits$testset
+```
+
+#### Baseline Model
+We will first implement a baseline glm model to test our dataset and will will further implement other methods for predictions.
+We will use Chi-squared, Lasso, and Ridge regressions for experimenting with feature elimination and check the results.
+
+```{r message=FALSE, warning=FALSE}
+lm.model <- function(training_dataset, validation_dataset, title) {
+  # Create a training control configuration that applies a 5-fold cross validation
+  train_control_config <- trainControl(method = "repeatedcv", 
+                                       number = 5, 
+                                       repeats = 1,
+                                       returnResamp = "all")
+  
+  # Fit a glm model to the input training data
+  this.model <- train(SalePrice ~ ., 
+                       data = training_dataset, 
+                       method = "glm", 
+                       metric = "RMSE",
+                       preProc = c("center", "scale"),
+                       trControl=train_control_config)
+  
+  # Prediction
+  this.model.pred <- predict(this.model, validation_dataset)
+  this.model.pred[is.na(this.model.pred)] <- 0 # To avoid null predictions
+  
+  # RMSE of the model
+  thismodel.rmse <- sqrt(mean((this.model.pred - validation_dataset$SalePrice)^2))
+  
+  # Error in terms of the mean deviation between the predicted value and the price of the houses
+  thismodel.price_error <- mean(abs((exp(this.model.pred) -1) - (exp(validation_dataset$SalePrice) -1)))
+
+  # Plot the predicted values against the actual prices of the houses
+  my_data <- as.data.frame(cbind(predicted=(exp(this.model.pred) -1), observed=(exp(validation_dataset$SalePrice) -1)))
+  ggplot(my_data, aes(predicted, observed)) +
+    geom_point() + geom_smooth(method = "lm") +
+    labs(x="Predicted") +
+    ggtitle(ggtitle(paste(title, 'RMSE: ', format(round(thismodel.rmse, 4), nsmall=4), ' --> Price ERROR:', format(round(thismodel.price_error, 0), nsmall=0), 
+                          ' €', sep=''))) +  
+    scale_x_continuous(labels = scales::comma) + 
+    scale_y_continuous(labels = scales::comma)
+}
+```
+
+##### Baseline Model Implementation
+We will first use the baseline model that will use all the features for prediction and will will later eliminate features using feature engineering methods.
+
+```{r message=FALSE, warning=FALSE}
+lm.model(training, validation, "Baseline")
+```
+
+
+### Chi-squared Selection
+We will first try with Chi-squared selection for feature elimination to check impact and the difference in our error.
+Since we've problems with the `FSelector` package, we will use the chisq.test included in the base package of R, to measure the relationship between the categorical features and the output. Only those.
+
+```{r warning=FALSE}
+# Compute the ChiSquared Statistic over the factor features ONLY
+features <- names(training[, sapply(training, is.factor) & colnames(training) != 'SalePrice'])
+chisquared <- data.frame(features, statistic = sapply(features, function(x) {
+  chisq.test(training$SalePrice, training[[x]])$statistic
+}))
+
+# Plot the result, and remove those below the 1st IQR (inter-quartile-range) --aggressive
+par(mfrow=c(1,2))
+boxplot(chisquared$statistic)
+bp.stats <- as.integer(boxplot.stats(chisquared$statistic)$stats)   # Get the statistics from the boxplot
+
+chisquared.threshold = bp.stats[2]  # This element represent the 1st quartile.
+text(y = bp.stats, labels = bp.stats, x = 1.3, cex=0.7)
+barplot(sort(chisquared$statistic), names.arg = chisquared$features, cex.names = 0.6, las=2, horiz = T)
+abline(v=chisquared.threshold, col='red')  # Draw a red line over the 1st IQR
+```
+
+Now, we can test if this a good move, by removing any feature with a Chi Squared test statistic against the output below the 1 IQR.
+
+```{r message=FALSE, warning=FALSE}
+# Determine what features to remove from the training set.
+features_to_remove <- as.character(chisquared[chisquared$statistic < chisquared.threshold, "features"])
+lm.model(training[!names(training) %in% features_to_remove], validation, "ChiSquared Model")
+```
+Our RMSE does not seem to improve and neither does the price error.
+
+#### Embedded (Regularization)
+We will now experiment with embedded methods. These methods add a penalty on the variables and lead the model into having fews coefficients.
+
+Ridge and Lasso Regressions are similar in terms of methodology, the superficial difference between both models is that Ridge squares the variables while Lasso regression uses the absolute value.Though, Lasso is  better than ridge regression at reducing the variance in models that contain a lot of useless variables, so in the context of our dataset, Lasso will be very beneficial in improving predictions.
+
+In summary,Using Ridge regression and Lasso regression both helps with variable elimination however Lasso is mainly useful for excluding useless variables from our regression equation which makes the final prediction equation simpler. On the other hand Ridge will be useful when most of our features are good for the prediction.
+
+
+##### Ridge Regression
+For this exercise, we are going to make use of the <a href="https://cran.r-project.org/web/packages/glmnet/index.html">`glmnet`</a> library. Take a look to the library to fit a glmnet model for Ridge Regression, using a grid of lambda values.
+
+```{r Ridge Regression, warning=FALSE}
+lambdas <- 10^seq(-3, 0, by = .05)
+
+set.seed(121)
+train_control_config <- trainControl(method = "repeatedcv", 
+                                     number = 5, 
+                                     repeats = 1,
+                                     returnResamp = "all")
+
+ridge.mod <- train(SalePrice ~ ., data = training, 
+               method = "glmnet", 
+               metric = "RMSE",
+               trControl=train_control_config,
+               tuneGrid = expand.grid(alpha = 0, lambda = lambdas))
+```
+
+The parameter `alpha = 0` means that we want to use the Ridge Regression way of expressing the penalty in regularization. If you replace that by `alpha = 1` then you get Lasso.
+
+###### Evaluation
+
+Plotting the RMSE for the different lambda values, we can see the impact of this parameter in the model performance.
+Small values seem to work better for this dataset.
+
+```{r Ridge RMSE}
+plot(ridge.mod)
+```
+
+Plotting the coefficients for different lambda values. As expected the larger the lambda (lower Norm) value the smaller the coefficients of the features. However, as we can see at the top of the features, there is no feature selection; i.e., the model always consider the 225 parameters.
+
+```{r Ridge Coefficients}
+plot(ridge.mod$finalModel)
+```
+
+```{r Ridge Evaluation}
+### Modeling using Ridge Regression
+ridge.mod.pred <- predict(ridge.mod, validation)
+ridge.mod.pred[is.na(ridge.mod.pred)] <- 0
+
+my_data <- as.data.frame(cbind(predicted=(exp(ridge.mod.pred) -1), observed=(exp(validation$SalePrice) -1)))
+ridge.mod.rmse <- sqrt(mean((ridge.mod.pred - validation$SalePrice)^2))
+ridge.mod.price_error <- mean(abs((exp(ridge.mod.pred) -1) - (exp(validation$SalePrice) -1)))
+
+ggplot(my_data, aes(predicted, observed)) +
+    geom_point() + geom_smooth(method = "glm") +
+    labs(x="Predicted") +
+    ggtitle(ggtitle(paste("Ridge", 'RMSE: ', format(round(ridge.mod.rmse, 4), nsmall=4), ' --> Price ERROR:', format(round(ridge.mod.price_error, 0), nsmall=0), 
+                        ' ???', sep=''))) +  
+    scale_x_continuous(labels = scales::comma) + 
+    scale_y_continuous(labels = scales::comma)
+```
+
+Rank the variables according to the importance attributed by the model.
+```{r}
+# Print, plot variable importance
+plot(varImp(ridge.mod), top = 20) # 20 most important features
+```
+
+##### Lasso Regresion
+
+The only thing that changes between Lasso and Ridge is the `alpha` parameter. The remaining part of the exercise is equivalent.
+The parameter `alpha = 0` means that we want to use the Ridge Regression way of expressing the penalty in regularization. If you replace that by `alpha = 1` then you get Lasso which means that Lasso applies a bigger penality which minimizes the prediction equation.
+
+```{r Lasso Regression, warning=FALSE}
+lambdas <- 10^seq(-3, 0, by = .05)
+
+set.seed(121)
+train_control_config <- trainControl(method = "repeatedcv", 
+                                     number = 5, 
+                                     repeats = 1,
+                                     returnResamp = "all")
+
+lasso.mod <- train(SalePrice ~ ., data = training, 
+               method = "glmnet", 
+               metric = "RMSE",
+               trControl=train_control_config,
+               tuneGrid = expand.grid(alpha = 1, lambda = lambdas))
+```
+
+###### Evaluation
+
+Plotting the RMSE for the different lambda values, we can see the impact of this parameter in the model performance.
+Small values seem to work better for this dataset.
+
+```{r Lasso RMSE}
+plot(lasso.mod)
+```
+
+Plotting the coefficients for different lambda values. As expected the larger the lambda (lower Norm) value the smaller the coefficients of the features. However, as we can see at the top of the features, there is no feature selection; i.e., the model always consider the 225 parameters.
+
+```{r Lasso Coefficients}
+plot(lasso.mod$finalModel)
+```
+
+```{r Lasso Evaluation}
+### Modeling using Lasso Regression
+lasso.mod.pred <- predict(lasso.mod, validation)
+lasso.mod.pred[is.na(lasso.mod.pred)] <- 0
+
+my_data <- as.data.frame(cbind(predicted=(exp(lasso.mod.pred) -1), observed=(exp(validation$SalePrice) -1)))
+lasso.mod.rmse <- sqrt(mean((lasso.mod.pred - validation$SalePrice)^2))
+lasso.mod.price_error <- mean(abs((exp(lasso.mod.pred) -1) - (exp(validation$SalePrice) -1)))
+
+ggplot(my_data, aes(predicted, observed)) +
+    geom_point() + geom_smooth(method = "glm") +
+    labs(x="Predicted") +
+    ggtitle(ggtitle(paste("Lasso", 'RMSE: ', format(round(lasso.mod.rmse, 4), nsmall=4), ' --> Price ERROR:', format(round(lasso.mod.price_error, 0), nsmall=0), 
+                        ' ???', sep=''))) +  
+    scale_x_continuous(labels = scales::comma) + 
+    scale_y_continuous(labels = scales::comma)
+```
+
+Rank the variables according to the importance attributed by the model.
+```{r}
+# Print, plot variable importance
+plot(varImp(lasso.mod), top = 20) # 20 most important features
+```
+
+
+#### Final Submission
+
+Based on the analysis, it shows that applying Lasso minimizes our error more than using the previously implemented methods since we have many variables that dont represent much importance in our dataset so the applied penalty improves the predictions to a big extent. Therefore, Lasso will be used for the final model. 
+Note: We splitted the original training data into train and validation to evaluate the candidate models. In order to generate the final submission we have to take instead all the data at our disposal.
+
+In addition, remember that we also applied a log transformation to the target variable, to revert this transformation you have to use the exp function.
+
+```{r Final Submission}
+
+# Train the model using all the data
+
+final.model <- train(SalePrice ~ ., data = training, 
+               method = "glmnet", 
+               metric = "RMSE",
+               trControl=train_control_config,
+               tuneGrid = expand.grid(alpha = 1, lambda = lambdas)) # Change values of alpha between 0 (Ridge) and 1 (Lasso)
+
+# Predict the prices for the test data (i.e., we use the exp function to revert the log transformation that we applied to the target variable)
+final.pred <- as.numeric(exp(predict(final.model, test_data))-1) 
+final.pred[is.na(final.pred)]
+hist(final.pred, main="Histogram of Predictions", xlab = "Predictions")
+
+lasso_submission <- data.frame(Id = original_test_data$Id, SalePrice= (final.pred))
+colnames(lasso_submission) <-c("Id", "SalePrice")
+write.csv(lasso_submission, file = "submission_Lasso.csv", row.names = FALSE)
+
+```
